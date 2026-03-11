@@ -1,0 +1,44 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'mongo-rust-vector-search-llm'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=mongo-rust-vector-search-llm",
+                    "--package=mongo-rust-vector-search-llm"
+                ],
+                "filter": {
+                    "name": "mongo-rust-vector-search-llm",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "config.yaml"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Remote",
+            "type": "lldb",
+            "request": "attach",
+            "program": "/mongo-rust-vector-search-llm/mongo-rust-vector-search-llm",
+            "processCreateCommands": [
+                "attach mongo-rust-vector-search-llm",
+                "process continue",
+            ],
+            "initCommands": [
+                "platform select remote-linux",
+            ],
+            "sourceMap": {
+                "/mongo-rust-vector-search-llm/": "${workspaceFolder}/"
+            }
+        }
+    ]
+}
