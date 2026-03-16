@@ -1,0 +1,7 @@
+mongo:
+  uri: !        # mongo connection string
+  database: !   # mongo database name
+  collection: ! # mongo target collection name
+  index: !      # mongo vector search index name
+minscore: !     # float value from 0 to 1 to exclude lower score values. > 0.7 acceptable
+hardware: cpu   # cpu or cuda

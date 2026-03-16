@@ -4,7 +4,12 @@ FROM rust:1.94.0-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     pkg-config \
+    wget \
     build-essential
+
+RUN wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-repo-ubuntu2004-11-8-local_11.8.0-520.61.05-1_amd64.deb \
+    sudo dpkg -i cuda-repo-ubuntu2004-11-8-local_11.8.0-520.61.05-1_amd64.deb \
+    sudo cp /var/cuda-repo-ubuntu2004-11-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
 
 # Create and empty project and build deps to have this steps cached.
 RUN USER=root cargo new --bin mongo-rust-vector-search-llm
@@ -15,6 +20,11 @@ COPY Cargo.toml Cargo.lock ./
 
 # --release or empty
 ARG TARGET=--release
+
+# Set CUDA paths so the Rust compiler can find them
+ENV PATH="/usr/local/cuda-12.2/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/cuda-12.2/lib64:${LD_LIBRARY_PATH}"
+ENV CUDA_COMPUTE_CAP=86
 
 # Build only dependencies
 RUN cargo build $TARGET && \

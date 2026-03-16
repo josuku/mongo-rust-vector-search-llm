@@ -1,97 +1,35 @@
+use crate::embedder::Embedder;
+use crate::store::mongo_store::MongoStore;
+use crate::store::Store;
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
-use candle_nn::var_builder::VarBuilderArgs;
-use candle_transformers::models::bert::{BertModel, Config};
-use mongodb::{
-    bson::{doc, Bson},
-    Client, Collection,
-};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    io::{self, Write},
-};
-use tokenizers::Tokenizer;
+use std::io::{self, Write};
 
-const MONGO_URI: &str = "mongodb+srv://mongo_user:mongo_password@mongo_url/";
-const MONGO_VECTOR_SEARCH_INDEX: &str = "vector_search";
-const MONGO_DATABASE: &str = "default";
-const MONGO_COLLECTION: &str = "descriptions";
-const SCORE_PRECISION: f32 = 0.6f32;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Item {
-    description: String,
-    embedding: Vec<f32>,
-}
-
-struct Embedder {
-    model: BertModel,
-    tokenizer: Tokenizer,
-    device: Device,
-}
-
-impl Embedder {
-    fn new() -> Result<Self> {
-        let device = Device::Cpu;
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_file("models/tokenizer.json")
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-        // Load config
-        let config: Config = serde_json::from_str(&std::fs::read_to_string("models/config.json")?)?;
-
-        // Load safetensors weights into HashMap<String, Tensor>
-        let weights: HashMap<String, Tensor> =
-            candle_core::safetensors::load("models/model.safetensors", &device)?;
-
-        // Wrap into VarBuilderArgs
-        let vb = VarBuilderArgs::from_tensors(weights, DType::F32, &device);
-
-        // Load BERT model
-        let model = BertModel::load(vb, &config)?;
-
-        Ok(Self {
-            model,
-            tokenizer,
-            device,
-        })
-    }
-
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let encoding = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-        let ids: Vec<i64> = encoding.get_ids().iter().map(|v| *v as i64).collect();
-        let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-
-        let seq_len = input.dims()[1];
-        let token_type_ids = Tensor::zeros(&[1, seq_len], DType::I64, &self.device)?;
-        let attention_mask = Tensor::ones(&[1, seq_len], DType::F32, &self.device)?;
-
-        let embeddings = self
-            .model
-            .forward(&input, &token_type_ids, Some(&attention_mask))?;
-        let pooled = embeddings.mean(1)?;
-        Ok(pooled.flatten_all()?.to_vec1()?)
-    }
-}
+mod config;
+mod embedder;
+mod store;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = Client::with_uri_str(MONGO_URI).await?;
-    let db = client.database(MONGO_DATABASE);
-    let collection = db.collection::<Item>(MONGO_COLLECTION);
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 2 {
+        println!("{} CONFIG_FILE", args[0]);
+        return Ok(());
+    }
 
-    let embedder = Embedder::new()?;
+    let config_content = std::fs::read_to_string(&args[1]).expect("Could not read config");
+    let config: config::Config =
+        serde_yaml::from_str(&config_content).expect("Could not parse config");
+
+    let mongo_store = MongoStore::new(&config.mongo, config.minscore).await;
+
+    let mut embedder = Embedder::new(config.hardware)?;
 
     loop {
         println!("\n=== MENU ===");
         println!("1) Add new text");
         println!("2) Search text");
-        println!("3) Exit");
+        println!("3) Update empty embeddings in collection");
+        println!("4) Exit");
 
         print!("Select option: ");
         io::stdout().flush()?;
@@ -100,9 +38,10 @@ async fn main() -> Result<()> {
         io::stdin().read_line(&mut option)?;
 
         match option.trim() {
-            "1" => add_text_to_db(&embedder, &collection).await?,
-            "2" => search_text(&embedder, &collection).await?,
-            "3" => {
+            "1" => add_text_to_db(&mut embedder, &mongo_store).await?,
+            "2" => search_text(&mut embedder, &mongo_store).await?,
+            "3" => fill_empty_embeddings(&mut embedder, &mongo_store).await?,
+            "4" => {
                 println!("exiting application!!!");
                 break;
             }
@@ -113,7 +52,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn add_text_to_db(embedder: &Embedder, collection: &Collection<Item>) -> anyhow::Result<()> {
+async fn add_text_to_db(embedder: &mut Embedder, mongo_store: &MongoStore) -> anyhow::Result<()> {
     print!("Enter text to store: ");
     io::stdout().flush()?;
 
@@ -123,18 +62,13 @@ async fn add_text_to_db(embedder: &Embedder, collection: &Collection<Item>) -> a
 
     let embedding = embedder.embed(text)?;
 
-    let item = Item {
-        description: text.to_string(),
-        embedding,
-    };
+    let _ = mongo_store.create(Some(text.to_string()), embedding).await;
 
-    collection.insert_one(item).await?;
-
-    println!("✅ Stored successfully");
+    println!("Stored successfully");
     Ok(())
 }
 
-async fn search_text(embedder: &Embedder, collection: &Collection<Item>) -> anyhow::Result<()> {
+async fn search_text(embedder: &mut Embedder, mongo_store: &MongoStore) -> anyhow::Result<()> {
     print!("Enter search text: ");
     io::stdout().flush()?;
 
@@ -144,38 +78,45 @@ async fn search_text(embedder: &Embedder, collection: &Collection<Item>) -> anyh
 
     let embedding = embedder.embed(text)?;
 
-    let query_vector: Vec<Bson> = embedding.iter().map(|v| Bson::Double(*v as f64)).collect();
+    let results = mongo_store.search(embedding).await?;
 
-    let pipeline = vec![
-        doc! {
-            "$vectorSearch": {
-                "index": MONGO_VECTOR_SEARCH_INDEX,
-                "path": "embedding",
-                "queryVector": query_vector,
-                "numCandidates": 100,
-                "limit": 5
-            }
-        },
-        doc! {
-            "$project": {
-                "description": 1,
-                "score": { "$meta": "vectorSearchScore" }
-            }
-        },
-        doc! {
-            "$match": {
-                "score": { "$gt": SCORE_PRECISION }
-            }
-        },
-    ];
-
-    let mut cursor = collection.aggregate(pipeline).await?;
-    println!("\n✅ Results:\n");
-
-    while cursor.advance().await? {
-        let doc = cursor.deserialize_current()?;
-        println!(":{:?} {:?}", doc["score"], doc["description"]);
+    println!("Results:\n");
+    for result in results {
+        println!(":{:?} {:?}", result.score, result.description);
     }
 
+    Ok(())
+}
+
+async fn fill_empty_embeddings(
+    embedder: &mut Embedder,
+    mongo_store: &MongoStore,
+) -> anyhow::Result<()> {
+    let mut total_documents = 0;
+    let mut total_time = std::time::Duration::new(0, 0);
+    let documents = mongo_store.get_all().await?;
+    for doc in documents {
+        // Only compute embeddings if field is empty
+        if doc.embeddings.is_some() {
+            continue;
+        }
+
+        total_documents += 1;
+
+        let start = std::time::Instant::now();
+        let embedding = embedder.embed(&doc.description.clone().unwrap_or_default())?;
+        let elapsed = start.elapsed();
+        total_time += elapsed;
+
+        // println!(
+        //     "Computed embedding for '{:?}', time spent: {:.2?} count:{}",
+        //     doc.description, elapsed, total_documents
+        // );
+
+        mongo_store.update(doc.id, embedding).await?;
+    }
+
+    println!("total docs:{} time:{:.2?}", total_documents, total_time);
+    embedder.print_times(true);
     Ok(())
 }

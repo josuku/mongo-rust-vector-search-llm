@@ -1,7 +1,5 @@
 # Mongo Rust Vector Search LLM
 
-Example made in Rust of vector search in Mongo using LLM for get embeddings
-
 ## Install Git LFS
 
 ```sh
@@ -35,18 +33,19 @@ git lfs pull
 }
 ```
 
-## Edit main.rs constants
+## Duplicate and edit config.yaml
 
-- MONGO_URI: uri with mongo connection string
-- MONGO_VECTOR_SEARCH_INDEX: name of the index created in previous step. If it doesn't match, vector search should not work
-- MONGO_DATABASE: name of the mongo database
-- MONGO_COLLECTION: name of the mongo collection where to search for data (and where search index is created)
-- SCORE_PRECISION: min score to show in results. > 0.7 acceptable
+```sh
+cp config-example.yaml config.yaml
+vi config.yaml
+```
 
 ## Run
 
 ```sh
-cargo run
+cargo run config.yaml
+
+cargo run config.yaml --release # better performance
 ```
 
 ## Build in docker
