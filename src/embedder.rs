@@ -1,4 +1,4 @@
-use crate::config::HardwareType;
+use crate::config::{HardwareType, ModelConfig};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::var_builder::VarBuilderArgs;
 use candle_transformers::models::bert::{BertModel, Config};
@@ -15,10 +15,10 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    pub fn new(hardware: HardwareType) -> anyhow::Result<Self> {
+    pub fn new(hardware: HardwareType, model_config: ModelConfig) -> anyhow::Result<Self> {
         let device = get_device(hardware)?;
-        let tokenizer = load_tokenizer()?;
-        let model = load_model(&device)?;
+        let tokenizer = load_tokenizer(&model_config)?;
+        let model = load_model(&model_config, &device)?;
         Ok(Self {
             model,
             tokenizer,
@@ -31,8 +31,8 @@ impl Embedder {
 
     pub fn embed(&mut self, text: &str) -> anyhow::Result<Vec<f32>> {
         let tokens = self.tokenization(text)?;
-        let embeddings = self.model_inferencing(tokens)?;
-        let result = self.pooling(embeddings)?;
+        let embeddings = self.model_inferencing(&tokens)?;
+        let result = self.pooling(&embeddings)?;
         Ok(result)
     }
 
@@ -48,20 +48,19 @@ impl Embedder {
         Ok(tokens)
     }
 
-    fn model_inferencing(&mut self, tokens: Tensor) -> anyhow::Result<Tensor> {
+    fn model_inferencing(&mut self, tokens: &Tensor) -> anyhow::Result<Tensor> {
         let inf_start = std::time::Instant::now();
         let seq_len = tokens.dims()[1];
         let token_type_ids = Tensor::zeros(&[1, seq_len], DType::I64, &self.device)?;
-        let attention_mask = Tensor::ones(&[1, seq_len], DType::F32, &self.device)?;
+        // let attention_mask = Tensor::ones(&[1, seq_len], DType::F32, &self.device)?;
 
-        let embeddings = self
-            .model
-            .forward(&tokens, &token_type_ids, Some(&attention_mask))?;
+        let embeddings = self.model.forward(tokens, &token_type_ids, None)?;
+        // .forward(&tokens, &token_type_ids, Some(&attention_mask))?;
         self.inferencing_time += inf_start.elapsed();
         Ok(embeddings)
     }
 
-    fn pooling(&mut self, embeddings: Tensor) -> anyhow::Result<Vec<f32>> {
+    fn pooling(&mut self, embeddings: &Tensor) -> anyhow::Result<Vec<f32>> {
         let pool_start = std::time::Instant::now();
         let pooled = embeddings.mean(1)?;
         let result = pooled.flatten_all()?.to_vec1()?;
@@ -102,14 +101,15 @@ fn get_device(hardware: HardwareType) -> anyhow::Result<Device> {
     Ok(device)
 }
 
-fn load_tokenizer() -> anyhow::Result<Tokenizer> {
-    Tokenizer::from_file("models/tokenizer.json").map_err(|e| anyhow::anyhow!(e.to_string()))
+fn load_tokenizer(model_config: &ModelConfig) -> anyhow::Result<Tokenizer> {
+    Tokenizer::from_file(model_config.tokenizer.clone()).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn load_model(device: &Device) -> anyhow::Result<BertModel> {
-    let config: Config = serde_json::from_str(&std::fs::read_to_string("models/config.json")?)?;
+fn load_model(model_config: &ModelConfig, device: &Device) -> anyhow::Result<BertModel> {
+    let config: Config =
+        serde_json::from_str(&std::fs::read_to_string(model_config.config.clone())?)?;
     let weights: HashMap<String, Tensor> =
-        candle_core::safetensors::load("models/model.safetensors", device)?;
+        candle_core::safetensors::load(model_config.safetensors.clone(), device)?;
     let vb = VarBuilderArgs::from_tensors(weights, DType::F32, device);
     Ok(BertModel::load(vb, &config)?)
 }

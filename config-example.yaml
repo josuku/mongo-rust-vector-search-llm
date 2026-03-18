@@ -3,5 +3,11 @@ mongo:
   database: !   # mongo database name
   collection: ! # mongo target collection name
   index: !      # mongo vector search index name
-minscore: !     # float value from 0 to 1 to exclude lower score values. > 0.7 acceptable
+qdrant:
+  uri: !        # qdrant gRPC API uri and port
+minscore: !     # float value from 0 to 1 to exclude lower score values. > 0.7 acceptable in mongo, > 0.5 acceptable in qdrant
 hardware: cpu   # cpu or cuda
+model:          # path of model files
+  tokenizer: models/tokenizer.json
+  config: models/config.json
+  safetensors: models/model.safetensors

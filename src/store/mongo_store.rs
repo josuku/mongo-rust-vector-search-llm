@@ -24,7 +24,7 @@ pub struct MongoStore {
 }
 
 impl MongoStore {
-    pub async fn new(config: &MongoConfig, min_score: f32) -> Self {
+    pub async fn new(config: &MongoConfig, min_score: &f32) -> Self {
         let client = Client::with_uri_str(config.uri.clone())
             .await
             .expect("Cannot open mongo client");
@@ -34,35 +34,36 @@ impl MongoStore {
         MongoStore {
             collection,
             index_name: config.index.clone(),
-            min_score,
+            min_score: *min_score,
         }
     }
 }
 
 impl Store for MongoStore {
-    async fn create(
+    async fn add(
         &self,
+        id: &str,
         description: Option<String>,
-        embeddings: Vec<f32>,
+        embeddings: &[f32],
     ) -> anyhow::Result<()> {
         let item = MongoItem {
-            _id: ObjectId::new(),
+            _id: ObjectId::from_str(id)?,
             description: description.unwrap_or_default(),
-            embeddings: Some(embeddings),
+            embeddings: Some(embeddings.to_vec()),
         };
         self.collection.insert_one(item).await?;
         Ok(())
     }
 
-    async fn update(&self, id: String, embeddings: Vec<f32>) -> anyhow::Result<()> {
-        let filter = doc! { "_id": ObjectId::from_str(&id)? };
+    async fn update(&self, id: &str, embeddings: &[f32]) -> anyhow::Result<()> {
+        let filter = doc! { "_id": ObjectId::from_str(id)? };
         let update = doc! { "$set": { "embeddings": embeddings } };
         self.collection.update_one(filter, update).await?;
         Ok(())
     }
 
-    async fn _get(&self, id: String) -> anyhow::Result<Option<StoreItem>> {
-        let filter = doc! { "_id": ObjectId::from_str(&id)? };
+    async fn get(&self, id: &str) -> anyhow::Result<Option<StoreItem>> {
+        let filter = doc! { "_id": ObjectId::from_str(id)? };
         let mut cursor = self.collection.find(filter).await?;
         if let Some(doc) = cursor.try_next().await? {
             Ok(Some(StoreItem {
@@ -88,7 +89,7 @@ impl Store for MongoStore {
         Ok(result)
     }
 
-    async fn search(&self, query_vector: Vec<f32>) -> anyhow::Result<Vec<StoreSearchResult>> {
+    async fn search(&self, query_vector: &[f32]) -> anyhow::Result<Vec<StoreSearchResult>> {
         let mut result = Vec::new();
         let pipeline = vec![
             doc! {
@@ -118,8 +119,6 @@ impl Store for MongoStore {
 
         while cursor.advance().await? {
             let doc = cursor.deserialize_current()?;
-            println!(":{:?} {:?}", doc["score"], doc["description"]);
-
             result.push(StoreSearchResult {
                 _id: doc["id"].to_string(),
                 description: doc["description"].to_string(),
